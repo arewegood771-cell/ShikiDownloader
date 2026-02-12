@@ -33,8 +33,11 @@ jobs:
           channel: 'stable'
 
       - name: Build APK
-        run: flet build apk main.py
-
+        run: |
+          # Pastikan flutter ada di path
+          export PATH="$PATH:$FLUTTER_HOME/bin"
+          # Jalankan build dengan detail agar kita tahu rusaknya di mana!
+          flet build apk main.py --verbose
       - name: Upload APK
         uses: actions/upload-artifact@v4  # INI YANG PALING PENTING! Update ke v4
         with:
