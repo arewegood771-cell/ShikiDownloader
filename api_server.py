@@ -37,14 +37,16 @@ def get_video_info(url):
         info = ydl.extract_info(url, download=False)
 
         # Get available formats
-        formats = []
-        seen_formats = set()
+        video_formats = []
+        audio_formats = []
+        seen_video = set()
+        seen_audio = set()
         
-        # Add "best" option first
-        formats.append({
+        # Add "best" video option first
+        video_formats.append({
             'format_id': 'best',
             'ext': 'mp4',
-            'quality': 'Best Available',
+            'quality': 'Best Video',
             'filesize': None,
             'width': None,
             'height': None,
@@ -53,64 +55,114 @@ def get_video_info(url):
             'acodec': None,
             'has_video': True,
             'has_audio': True,
+            'type': 'video'
+        })
+        
+        # Add "best audio" option
+        audio_formats.append({
+            'format_id': 'bestaudio',
+            'ext': 'm4a',
+            'quality': 'Best Audio',
+            'filesize': None,
+            'abr': None,
+            'has_video': False,
+            'has_audio': True,
+            'type': 'audio'
         })
         
         if 'formats' in info:
             for f in info['formats']:
-                # Skip formats without video
-                if f.get('vcodec') == 'none':
-                    continue
-                
-                height = f.get('height', 0)
-                width = f.get('width', 0)
-                ext = f.get('ext', 'mp4')
-                fps = f.get('fps', 0)
-                has_audio = f.get('acodec') != 'none'
-                
-                # Create quality label
-                if height:
-                    quality = f"{height}p"
-                    if fps and fps > 30:
-                        quality += f" {int(fps)}fps"
-                    if not has_audio:
-                        quality += " (no audio)"
-                else:
-                    quality = f.get('format_note', 'Unknown Quality')
-                
-                # Create unique key
-                format_key = f"{height}_{ext}_{has_audio}"
-                
-                # Skip duplicates
-                if format_key in seen_formats:
-                    continue
+                # Video formats
+                if f.get('vcodec') != 'none':
+                    height = f.get('height', 0)
+                    width = f.get('width', 0)
+                    ext = f.get('ext', 'mp4')
+                    fps = f.get('fps', 0)
+                    has_audio = f.get('acodec') != 'none'
                     
-                seen_formats.add(format_key)
+                    # Create quality label
+                    if height:
+                        quality = f"{height}p"
+                        if fps and fps > 30:
+                            quality += f" {int(fps)}fps"
+                        if not has_audio:
+                            quality += " (no audio)"
+                    else:
+                        quality = f.get('format_note', 'Unknown Quality')
+                    
+                    # Create unique key
+                    format_key = f"{height}_{ext}_{has_audio}"
+                    
+                    # Skip duplicates
+                    if format_key in seen_video:
+                        continue
+                        
+                    seen_video.add(format_key)
+                    
+                    # Only add formats with both video and audio, or high quality video
+                    if has_audio or height >= 720:
+                        video_formats.append({
+                            'format_id': f.get('format_id'),
+                            'ext': ext,
+                            'quality': quality,
+                            'filesize': f.get('filesize'),
+                            'width': width,
+                            'height': height,
+                            'fps': fps,
+                            'vcodec': f.get('vcodec'),
+                            'acodec': f.get('acodec'),
+                            'has_video': True,
+                            'has_audio': has_audio,
+                            'type': 'video'
+                        })
                 
-                # Only add formats with both video and audio, or high quality video
-                if has_audio or height >= 720:
-                    formats.append({
+                # Audio-only formats
+                elif f.get('acodec') != 'none':
+                    abr = f.get('abr', 0)
+                    ext = f.get('ext', 'm4a')
+                    
+                    # Create quality label
+                    if abr:
+                        quality = f"{int(abr)}kbps"
+                    else:
+                        quality = f.get('format_note', 'Audio')
+                    
+                    # Create unique key
+                    format_key = f"{abr}_{ext}"
+                    
+                    if format_key in seen_audio:
+                        continue
+                    
+                    seen_audio.add(format_key)
+                    
+                    audio_formats.append({
                         'format_id': f.get('format_id'),
                         'ext': ext,
                         'quality': quality,
                         'filesize': f.get('filesize'),
-                        'width': width,
-                        'height': height,
-                        'fps': fps,
-                        'vcodec': f.get('vcodec'),
-                        'acodec': f.get('acodec'),
-                        'has_video': True,
-                        'has_audio': has_audio,
+                        'abr': abr,
+                        'has_video': False,
+                        'has_audio': True,
+                        'type': 'audio'
                     })
 
-        # Sort: best quality with audio first, then by height
-        formats.sort(key=lambda x: (
-            0 if x['format_id'] == 'best' else 1,  # best first
-            -1 if x.get('has_audio') else 1,        # with audio preferred
-            -(x.get('height') or 0),                # higher resolution first
+        # Sort video formats
+        video_formats.sort(key=lambda x: (
+            0 if x['format_id'] == 'best' else 1,
+            -1 if x.get('has_audio') else 1,
+            -(x.get('height') or 0),
         ))
         
-        # Limit to 10 most relevant formats
-        formats = formats[:10]
+        # Sort audio formats by bitrate
+        audio_formats.sort(key=lambda x: (
+            0 if x['format_id'] == 'bestaudio' else 1,
+            -(x.get('abr') or 0),
+        ))
+        
+        # Combine and limit
+        video_formats = video_formats[:8]
+        audio_formats = audio_formats[:5]
+        all_formats = video_formats + audio_formats
 
         return {
             'title': info.get('title'),
@@ -118,7 +170,7 @@ def get_video_info(url):
             'duration': info.get('duration'),
             'uploader': info.get('uploader') or info.get('channel'),
             'description': info.get('description'),
-            'formats': formats,
+            'formats': all_formats,
             'url': url
         }
 
@@ -254,9 +306,41 @@ def health():
 
 
 @app.route('/')
-def serve_frontend():
-    """Serve the HTML frontend"""
-    return send_from_directory('.', 'video-downloader.html')
+def index():
+    """Root endpoint - API information"""
+    return jsonify({
+        'name': 'Rikkiu Video Downloader API',
+        'version': '2.0',
+        'status': 'running',
+        'endpoints': {
+            'health': '/api/health',
+            'video_info': '/api/video-info (POST)',
+            'download': '/api/download (POST)'
+        },
+        'message': 'API is working! Use the endpoints above.'
+    })
+
+
+@app.errorhandler(404)
+def not_found(e):
+    """Handle 404 errors"""
+    return jsonify({
+        'error': 'Endpoint not found',
+        'available_endpoints': {
+            'health': '/api/health (GET)',
+            'video_info': '/api/video-info (POST)',
+            'download': '/api/download (POST)'
+        }
+    }), 404
+
+
+@app.errorhandler(500)
+def server_error(e):
+    """Handle 500 errors"""
+    return jsonify({
+        'error': 'Internal server error',
+        'message': str(e)
+    }), 500
 
 
 if __name__ == '__main__':
