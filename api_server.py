@@ -7,7 +7,14 @@ import json
 from datetime import datetime
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+# Enable CORS for all routes with specific configuration
+CORS(app, resources={
+    r"/api/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type"]
+    }
+})
 
 # Temporary directory for downloads
 TEMP_DIR = tempfile.gettempdir()
@@ -16,9 +23,14 @@ TEMP_DIR = tempfile.gettempdir()
 def get_video_info(url):
     """Get video information without downloading"""
     ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
+        'quiet': False,
+        'no_warnings': False,
         'extract_flat': False,
+        'nocheckcertificate': True,
+        'geo_bypass': True,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        }
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -26,22 +38,79 @@ def get_video_info(url):
 
         # Get available formats
         formats = []
+        seen_formats = set()
+        
+        # Add "best" option first
+        formats.append({
+            'format_id': 'best',
+            'ext': 'mp4',
+            'quality': 'Best Available',
+            'filesize': None,
+            'width': None,
+            'height': None,
+            'fps': None,
+            'vcodec': None,
+            'acodec': None,
+            'has_video': True,
+            'has_audio': True,
+        })
+        
         if 'formats' in info:
             for f in info['formats']:
-                # Only include formats with video
-                if f.get('vcodec') != 'none':
+                # Skip formats without video
+                if f.get('vcodec') == 'none':
+                    continue
+                
+                height = f.get('height', 0)
+                width = f.get('width', 0)
+                ext = f.get('ext', 'mp4')
+                fps = f.get('fps', 0)
+                has_audio = f.get('acodec') != 'none'
+                
+                # Create quality label
+                if height:
+                    quality = f"{height}p"
+                    if fps and fps > 30:
+                        quality += f" {int(fps)}fps"
+                    if not has_audio:
+                        quality += " (no audio)"
+                else:
+                    quality = f.get('format_note', 'Unknown Quality')
+                
+                # Create unique key
+                format_key = f"{height}_{ext}_{has_audio}"
+                
+                # Skip duplicates
+                if format_key in seen_formats:
+                    continue
+                    
+                seen_formats.add(format_key)
+                
+                # Only add formats with both video and audio, or high quality video
+                if has_audio or height >= 720:
                     formats.append({
                         'format_id': f.get('format_id'),
-                        'ext': f.get('ext'),
-                        'quality': f.get('format_note') or f.get('quality'),
+                        'ext': ext,
+                        'quality': quality,
                         'filesize': f.get('filesize'),
-                        'width': f.get('width'),
-                        'height': f.get('height'),
-                        'fps': f.get('fps'),
+                        'width': width,
+                        'height': height,
+                        'fps': fps,
+                        'vcodec': f.get('vcodec'),
+                        'acodec': f.get('acodec'),
+                        'has_video': True,
+                        'has_audio': has_audio,
                     })
 
-        # Sort formats by quality (height)
-        formats.sort(key=lambda x: (x.get('height') or 0), reverse=True)
+        # Sort: best quality with audio first, then by height
+        formats.sort(key=lambda x: (
+            0 if x['format_id'] == 'best' else 1,  # best first
+            -1 if x.get('has_audio') else 1,        # with audio preferred
+            -(x.get('height') or 0),                # higher resolution first
+        ))
+        
+        # Limit to 10 most relevant formats
+        formats = formats[:10]
 
         return {
             'title': info.get('title'),
@@ -49,7 +118,7 @@ def get_video_info(url):
             'duration': info.get('duration'),
             'uploader': info.get('uploader') or info.get('channel'),
             'description': info.get('description'),
-            'formats': formats[:10],  # Limit to top 10 formats
+            'formats': formats,
             'url': url
         }
 
@@ -59,17 +128,49 @@ def download_video(url, format_id=None):
     output_template = os.path.join(
         TEMP_DIR, f'video_{datetime.now().timestamp()}.%(ext)s')
 
+    # Enhanced yt-dlp options with fallbacks
     ydl_opts = {
         'format': format_id if format_id else 'best',
         'outtmpl': output_template,
-        'quiet': True,
-        'no_warnings': True,
+        'quiet': False,
+        'no_warnings': False,
+        'ignoreerrors': False,
+        'nocheckcertificate': True,
+        'geo_bypass': True,
+        'retries': 3,
+        'fragment_retries': 3,
+        'http_chunk_size': 10485760,  # 10MB chunks
+        # Add headers to avoid blocking
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-us,en;q=0.5',
+            'Sec-Fetch-Mode': 'navigate',
+        }
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-        return filename
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+            
+            # Verify file exists
+            if not os.path.exists(filename):
+                raise Exception("Download completed but file not found")
+            
+            return filename
+    except Exception as e:
+        # Try fallback with simpler format
+        print(f"First attempt failed: {str(e)}, trying fallback...")
+        ydl_opts['format'] = 'best'
+        
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info)
+                return filename
+        except Exception as fallback_error:
+            raise Exception(f"Download failed: {str(fallback_error)}")
 
 
 @app.route('/api/video-info', methods=['POST'])
@@ -100,13 +201,21 @@ def download():
         if not url:
             return jsonify({'error': 'URL is required'}), 400
 
+        print(f"Download request - URL: {url}, Format: {format_id}")
+        
         filepath = download_video(url, format_id)
+        
+        if not os.path.exists(filepath):
+            return jsonify({'error': 'File download failed - file not found'}), 500
+
+        print(f"Download successful - File: {filepath}, Size: {os.path.getsize(filepath)} bytes")
 
         # Send file and delete after sending
         response = send_file(
             filepath,
             as_attachment=True,
-            download_name=os.path.basename(filepath)
+            download_name=os.path.basename(filepath),
+            mimetype='video/mp4'
         )
 
         # Schedule file deletion after sending
@@ -115,13 +224,27 @@ def download():
             try:
                 if os.path.exists(filepath):
                     os.remove(filepath)
-            except:
-                pass
+                    print(f"Cleanup - Deleted: {filepath}")
+            except Exception as e:
+                print(f"Cleanup error: {str(e)}")
 
         return response
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        error_msg = str(e)
+        print(f"Download error: {error_msg}")
+        
+        # Return more specific error messages
+        if 'format' in error_msg.lower():
+            return jsonify({'error': 'Format tidak tersedia. Coba pilih format lain.'}), 400
+        elif 'private' in error_msg.lower() or 'members-only' in error_msg.lower():
+            return jsonify({'error': 'Video private atau members-only. Tidak bisa didownload.'}), 403
+        elif 'not available' in error_msg.lower():
+            return jsonify({'error': 'Video tidak tersedia di region ini atau sudah dihapus.'}), 404
+        elif 'copyright' in error_msg.lower():
+            return jsonify({'error': 'Video terkena copyright. Tidak bisa didownload.'}), 403
+        else:
+            return jsonify({'error': f'Download gagal: {error_msg}'}), 500
 
 
 @app.route('/api/health', methods=['GET'])
